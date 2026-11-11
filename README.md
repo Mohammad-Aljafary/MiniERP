@@ -1,560 +1,530 @@
 # NexusERP
 
-A lightweight, modular ERP (Enterprise Resource Planning) platform for
-small businesses. NexusERP brings product catalog management, inventory,
-purchasing, sales, customers, suppliers, invoicing, and operational
-reporting into one application.
+A multi-tenant SaaS ERP for small and medium-sized businesses. NexusERP brings product catalog management, inventory, purchasing, sales, customers, suppliers, invoicing, and operational reporting into one application, while allowing many independent companies to use the same platform without seeing or modifying one another's data.
 
-> **Project status:** Planning / initial development\
-> **Repository:** Add your GitHub repository URL\
+> **Project status:** Planning / initial development  
+> **Repository:** Add your GitHub repository URL  
 > **Live demo:** Add deployment URL when available
 
-NexusERP is designed as a portfolio-quality software engineering
-project. The focus is not on reproducing every feature of a large ERP
-suite, but on implementing a small set of connected business workflows
-correctly, with particular attention to relational data modeling,
-transaction safety, concurrency, authorization, testing, and deployment.
-
-------------------------------------------------------------------------
+NexusERP is a portfolio-quality software engineering project. Its focus is not to reproduce every feature of a large ERP suite, but to implement connected business workflows correctly and demonstrate practical SaaS engineering: tenant isolation, relational data modeling, transaction safety, concurrency, observability, testing, and deployment.
 
 ## Table of contents
 
--   [1. Project goals](#1-project-goals)
--   [2. Scope](#2-scope)
--   [3. Core business workflows](#3-core-business-workflows)
--   [4. Technology stack](#4-technology-stack)
--   [5. Architecture](#5-architecture)
--   [6. Domain model](#6-domain-model)
--   [7. API outline](#7-api-outline)
--   [8. Business rules and
-    consistency](#8-business-rules-and-consistency)
--   [9. Repository structure](#9-repository-structure)
--   [10. Milestones and implementation
-    plan](#10-milestones-and-implementation-plan)
--   [11. Testing strategy](#11-testing-strategy)
--   [12. Security and reliability](#12-security-and-reliability)
--   [13. Local development](#13-local-development)
--   [14. Definition of done](#14-definition-of-done)
--   [15. Future improvements](#15-future-improvements)
--   [16. CV description](#16-cv-description)
+- [1. Product goals and assumptions](#1-product-goals-and-assumptions)
+- [2. MVP scope](#2-mvp-scope)
+- [3. Core business workflows](#3-core-business-workflows)
+- [4. Technology stack](#4-technology-stack)
+- [5. Architecture](#5-architecture)
+- [6. Multi-tenant database design](#6-multi-tenant-database-design)
+- [7. API design](#7-api-design)
+- [8. Business consistency and concurrency](#8-business-consistency-and-concurrency)
+- [9. Capacity and performance plan](#9-capacity-and-performance-plan)
+- [10. Infrastructure and deployment](#10-infrastructure-and-deployment)
+- [11. Repository structure](#11-repository-structure)
+- [12. Milestones and implementation plan](#12-milestones-and-implementation-plan)
+- [13. Testing and load validation](#13-testing-and-load-validation)
+- [14. Security, isolation, and reliability](#14-security-isolation-and-reliability)
+- [15. Local development](#15-local-development)
+- [16. Definition of done](#16-definition-of-done)
+- [17. Future improvements](#17-future-improvements)
+- [18. CV description](#18-cv-description)
 
-------------------------------------------------------------------------
+---
 
-## 1. Project goals
+## 1. Product goals and assumptions
 
-NexusERP aims to provide a simple operational system for a small
-business, such as an electronics shop, that needs to:
+### Product model
 
-1.  Maintain a catalog of products and categories.
-2.  Track stock across one or more warehouses.
-3.  Purchase products from suppliers and receive deliveries.
-4.  Sell products to customers and issue invoices.
-5.  Track inventory movements and transaction history.
-6.  Control employee access using roles and permissions.
-7.  Review business activity through reports and a dashboard.
+NexusERP is a **shared, multi-tenant SaaS application**. Many companies (tenants) use the same deployed application and PostgreSQL cluster. Each company has its own users, roles, products, customers, suppliers, warehouses, orders, invoices, and reports. A user may belong to more than one company and must explicitly operate within one active company context at a time.
+
+The initial tenancy strategy is **shared database, shared schema, tenant discriminator**: business tables contain a `tenant_id`, and every read and write is scoped to it. This is cost-effective and operationally manageable for the target scale. It is not database-per-customer at the start.
+
+### Capacity target
+
+The initial design target is:
+
+| Measure | Initial target | Meaning |
+|---|---:|---|
+| Registered users | 10,000+ | Accounts across all tenants; not all are online at once |
+| Simultaneously active users | 1,000 | Users with an active application session and making requests during a usage period |
+| Sustained API throughput | 200 requests/second | Initial system-wide load-test target |
+| Short burst throughput | 500 requests/second | Brief bursts, subject to endpoint mix and latency |
+| Read latency | p95 below 300 ms | Ordinary indexed reads under the target test mix |
+| Write latency | p95 below 500 ms | Ordinary business writes, excluding long reports and external integrations |
+| Availability objective | 99.5% initially | A planning objective, not a measured guarantee or formal SLA |
+
+These are **engineering targets to validate**, not a promise that a particular machine will achieve them. “1,000 active users” is not the same as 1,000 simultaneous database queries. Actual capacity depends on how frequently users act, endpoint complexity, tenant data size, query plans, hardware, and workload distribution. Load tests must model realistic think time and a mix of reads and writes.
 
 ### Engineering goals
 
-The project will demonstrate the ability to:
+- Build a modular Go backend with explicit module boundaries.
+- Enforce tenant isolation in application code and at the database boundary.
+- Model business data with tenant-aware constraints and indexes.
+- Use PostgreSQL transactions for critical workflows.
+- Prevent overselling and duplicate processing under concurrent requests.
+- Keep API instances stateless so they can scale horizontally.
+- Measure performance and capacity instead of guessing.
+- Provide automated tests, CI, deployment documentation, and observability.
 
--   Design a normalized relational database and meaningful constraints.
--   Build a REST API in Go with clear module boundaries.
--   Write and optimize SQL instead of hiding all database behavior
-    behind an ORM.
--   Use PostgreSQL transactions to keep related business operations
-    consistent.
--   Handle concurrent requests without overselling inventory.
--   Implement authentication, authorization, validation, and audit
-    logging.
--   Write unit and integration tests for critical business workflows.
--   Containerize and deploy an application with repeatable environments.
+## 2. MVP scope
 
-------------------------------------------------------------------------
+### Core modules
 
-## 2. Scope
+| Module | Responsibilities |
+|---|---|
+| Platform identity | Sign-up/invitations, authentication, sessions, users, tenant memberships |
+| Tenant administration | Company profile, settings, membership management, tenant-scoped roles and permissions |
+| Products and categories | Product catalog, SKU, prices, categories |
+| Inventory | Warehouses, stock balances, immutable stock movements, adjustments |
+| Customers | Customer profiles and sales history |
+| Suppliers | Supplier profiles and purchase history |
+| Purchasing | Purchase orders, partial receipts, supplier references |
+| Sales | Sales orders, order items, confirmation, cancellation |
+| Invoices | Invoice records, totals, status, printable representation |
+| Reporting | Sales summaries, low-stock products, inventory valuation |
+| Audit | Tenant-scoped record of important actions and actors |
 
-### MVP modules
+### Explicitly out of scope for the first release
 
-  -----------------------------------------------------------------------
-  Module                              Responsibilities
-  ----------------------------------- -----------------------------------
-  Authentication and users            Login, user management, roles,
-                                      permissions
+- Full accounting/general ledger, payroll, HR, manufacturing, and advanced tax filing.
+- Country-specific e-invoicing integrations and multi-currency accounting.
+- Microservices, Kubernetes, Kafka, and database-per-tenant provisioning.
+- Complex custom workflow builders, mobile apps, and AI features.
+- Active-active multi-region writes.
 
-  Products and categories             Product catalog, SKU, price,
-                                      category
-
-  Inventory                           Warehouses, stock balances, stock
-                                      movements, adjustments
-
-  Customers                           Customer profiles and sales history
-
-  Suppliers                           Supplier profiles and purchase
-                                      history
-
-  Purchasing                          Purchase orders, receiving, partial
-                                      deliveries
-
-  Sales                               Sales orders, order items, order
-                                      status, stock deduction
-
-  Invoices                            Invoice creation, totals, status,
-                                      printable representation
-
-  Reporting                           Sales summaries, low-stock
-                                      products, inventory valuation
-
-  Audit logs                          Trace important changes and the
-                                      user responsible
-  -----------------------------------------------------------------------
-
-### Explicitly out of scope for the first version
-
-To keep the project achievable, the initial release will not implement:
-
--   Full accounting or general-ledger functionality.
--   Payroll and human resources.
--   Tax filing or country-specific electronic invoicing integrations.
--   Multi-currency accounting.
--   Manufacturing, bills of materials, or production planning.
--   Complex promotions, loyalty programs, or point-of-sale hardware.
--   Microservices or Kubernetes.
--   AI features.
-
-These may be considered after the core workflows are stable.
-
-------------------------------------------------------------------------
+These are potential later extensions, not prerequisites for the initial SaaS product.
 
 ## 3. Core business workflows
 
-### 3.1 Purchasing and receiving stock
+### Purchasing and receiving
 
-1.  An authorized employee creates a purchase order.
-2.  The employee selects a supplier and adds products and quantities.
-3.  The purchase order is submitted.
-4.  When goods arrive, an employee records the received quantities.
-5.  The system increases stock for the received quantities.
-6.  The system records inventory movements and updates the purchase
-    order status.
+1. An authorized user creates a purchase order in the active tenant.
+2. The user selects a supplier and adds products and quantities.
+3. The order is submitted.
+4. When goods arrive, the user records received quantities.
+5. A database transaction updates inventory balances and appends stock movements.
+6. The purchase order status and audit record are updated.
 
-The system must support partial deliveries. Receiving 6 units from an
-order of 10 must leave 4 units outstanding.
+Partial deliveries are supported. Receiving 6 units from an order of 10 leaves 4 outstanding. Repeated requests must not apply the same receipt twice.
 
-### 3.2 Selling products
+### Selling products
 
-1.  An employee creates a sales order and selects a customer.
-2.  The employee adds products and quantities.
-3.  The system checks stock availability.
-4.  The order is confirmed.
-5.  In one database transaction, the system deducts stock, records
-    inventory movements, and creates the invoice.
-6.  The order and invoice statuses are updated.
+1. A user creates a sales order and selects a customer.
+2. The user adds products and quantities.
+3. The system validates that the order, customer, products, and warehouse belong to the active tenant.
+4. On confirmation, a database transaction validates and deducts stock, appends inventory movements, creates an invoice, and updates the order.
+5. The transaction commits only if every critical step succeeds.
 
-If any critical step fails, the transaction must roll back. The
-application must not leave a completed sale with unchanged inventory.
+### Inventory adjustments and cancellation
 
-### 3.3 Inventory adjustments
-
-Authorized users can record adjustments for reasons such as damaged
-goods, stock counts, or corrections. Every adjustment must create an
-inventory movement with a reason and actor. Existing movement records
-should not be silently overwritten.
-
-### 3.4 Order cancellation
-
-Cancellation rules must be explicit. For example, cancelling a confirmed
-sale may require a compensating stock movement that returns the sold
-quantity to inventory. The original movement remains in the history.
-
-------------------------------------------------------------------------
+Every stock change creates an append-only movement with a reason, reference, tenant, and actor. A confirmed sale cancellation or return uses a compensating movement; historical movements are never silently deleted or rewritten.
 
 ## 4. Technology stack
 
-The initial stack is intentionally small and SQL-oriented.
+| Layer | Technology | Purpose |
+|---|---|---|
+| Backend | Go | API and business logic |
+| HTTP router | Chi | Routing and middleware |
+| Database | PostgreSQL | Relational data, transactions, constraints, row-level security |
+| PostgreSQL driver | pgx / pgxpool | Connectivity and connection pooling |
+| Query generation | sqlc | Typed Go access from explicit SQL |
+| Migrations | golang-migrate or Atlas | Versioned schema changes |
+| Frontend | React + TypeScript | SaaS web application |
+| API contract | OpenAPI | Contract and interactive documentation |
+| Cache / rate limits | Redis (introduced when justified) | Short-lived cache, distributed rate limiting, ephemeral coordination |
+| Async work | PostgreSQL outbox + Go workers initially | Reliable background tasks |
+| Local environment | Docker Compose | Reproducible development stack |
+| Integration tests | Testcontainers or Docker PostgreSQL | Tests against real PostgreSQL |
+| Load tests | k6 | Throughput, latency, and concurrency validation |
+| Metrics | Prometheus + Grafana | Application and infrastructure metrics |
+| CI | GitHub Actions | Tests, linting, migrations, builds |
 
-  -----------------------------------------------------------------------
-  Layer                   Technology              Purpose
-  ----------------------- ----------------------- -----------------------
-  Backend language        Go                      Application and
-                                                  business logic
+### Why SQL-first
 
-  HTTP router             Chi                     Routing and middleware
-
-  Database                PostgreSQL              Relational business
-                                                  data
-
-  PostgreSQL driver       pgx                     Go/PostgreSQL
-                                                  connectivity
-
-  Query generation        sqlc                    Type-safe Go code
-                                                  generated from SQL
-
-  Schema migrations       golang-migrate or Atlas Versioned database
-                                                  schema changes
-
-  Frontend                React + TypeScript      Web interface
-
-  API contract            OpenAPI                 API documentation
-
-  Local infrastructure    Docker Compose          Repeatable local
-                                                  environment
-
-  Cache / queue           Redis (later milestone) Optional caching and
-                                                  background jobs
-
-  Unit tests              Go testing package      Fast business-logic
-                                                  tests
-
-  Integration tests       Testcontainers or       Tests against real
-                          Docker-based test DB    PostgreSQL
-
-  CI                      GitHub Actions          Automated checks
-  -----------------------------------------------------------------------
-
-### Why this stack?
-
--   **Go** provides a small language and runtime with explicit error
-    handling and built-in concurrency primitives.
--   **Chi** keeps the HTTP layer lightweight without imposing a large
-    framework.
--   **PostgreSQL** provides relational integrity, transactions,
-    constraints, and row-level locking.
--   **sqlc** keeps SQL visible and generates typed database access code.
--   **pgx** provides a PostgreSQL-native driver and transaction support.
-
-### Important implementation choice
-
-Do not introduce an ORM initially. Use SQL migrations, explicit queries,
-`pgx`, and `sqlc`. This makes database behavior easier to inspect and
-gives the project a stronger database-engineering focus.
-
-------------------------------------------------------------------------
+Use explicit SQL, pgx, and sqlc rather than introducing an ORM initially. This keeps tenant predicates, transaction boundaries, locks, and query plans visible. Generated sqlc code must not be edited by hand.
 
 ## 5. Architecture
 
-NexusERP will start as a **modular monolith**.
+NexusERP starts as a **modular monolith**. One Go application contains modules with clear ownership, but related business operations can share one PostgreSQL transaction. This is easier to develop, test, and operate than microservices, and it is sufficient for the target when designed and measured carefully.
 
-A modular monolith is one deployable backend application organized into
-business modules. Modules have clear responsibilities, but critical
-workflows can use a single PostgreSQL transaction. This is simpler to
-develop and operate than microservices and is appropriate for the
-initial scope.
+### Logical architecture
 
-### High-level architecture
+```text
+ Browser (React + TypeScript)
+          |
+       HTTPS
+          |
+ CDN / WAF / Load Balancer
+          |
+   +------+------+------+
+   |      |      |      |
+ Go API Go API Go API ...     Stateless replicas
+   |      |      |
+   +------+------+----------+
+          |
+  Middleware and request context
+  - authentication / session
+  - active tenant membership
+  - authorization / rate limits
+  - request ID / tracing
+          |
+  Application services (modular monolith)
+  - tenants / identity / RBAC
+  - catalog / customers / suppliers
+  - inventory / purchasing / sales
+  - invoices / reports / audit
+          |
+  Repositories and sqlc queries
+          |
+   PostgreSQL primary ---- optional read replica
+          |
+   Outbox table -> Go background workers
 
-``` text
-                    React + TypeScript
-                            |
-                         HTTPS
-                            |
-                    Go HTTP API (Chi)
-                            |
-                 Middleware / Validation
-                            |
-          +-----------------+-----------------+
-          |                 |                 |
-       Auth             Products          Customers
-          |                 |                 |
-       Sales            Inventory          Suppliers
-          |                 |                 |
-       Purchases         Invoices           Reports
-          +-----------------+-----------------+
-                            |
-                    Application services
-                            |
-                   Repositories / sqlc
-                            |
-                       PostgreSQL
-
-              Optional later: Redis / workers
+ Redis (optional): cache / rate-limit counters
+ Object storage (later): exports / uploaded documents
 ```
 
-### Responsibilities
+### Request and tenant context
 
--   **HTTP handlers:** Parse requests, validate transport-level input,
-    call application services, and return HTTP responses.
--   **Services:** Enforce business rules and coordinate workflows.
--   **Repositories / generated queries:** Execute database operations.
--   **Database:** Enforce constraints and provide transaction isolation.
--   **Workers (later):** Process non-critical asynchronous work such as
-    notifications and scheduled reports.
+1. Authenticate the caller and identify the user from a verified session/token.
+2. Resolve the requested active tenant from a trusted route/subdomain or request context.
+3. Verify that the authenticated user has an active membership in that tenant.
+4. Load tenant-scoped roles/permissions and authorize the requested action.
+5. Start the database transaction and set the tenant context transaction-locally for PostgreSQL RLS.
+6. Execute tenant-scoped queries and commit/rollback.
 
-### Architectural rules
+A client-supplied `tenant_id` is **not proof of access**. Never trust a tenant identifier from a request without checking membership. Avoid a mutable global “current tenant” variable in the Go process; tenant context belongs to the request and transaction.
 
-1.  HTTP handlers must not contain business workflows or raw SQL.
-2.  Business rules belong in services or domain-focused functions.
-3.  Database constraints must protect important invariants even if
-    application validation exists.
-4.  Transactions should be created at the service/workflow boundary.
-5.  Modules should not reach into another module's internal
-    implementation unnecessarily.
-6.  Use interfaces where they create a useful test seam or decouple a
-    real dependency; avoid creating interfaces for every struct by
-    default.
+### Module and transaction rules
 
-------------------------------------------------------------------------
+- HTTP handlers parse/validate transport input and call application services.
+- Services own business workflows and transaction boundaries.
+- Repositories/sqlc own persistence queries; all business queries must be tenant-scoped.
+- Cross-module calls use explicit service interfaces or application-level functions, not direct access to another module's internals.
+- Critical operations use one short PostgreSQL transaction.
+- Do not make network calls to external services while holding database locks or open transactions.
+- API instances are stateless: do not store sessions, tenant state, or business state only in process memory.
+- Add interfaces where they create a real test seam or boundary; avoid interface-per-struct ceremony.
 
-## 6. Domain model
+## 6. Multi-tenant database design
 
-The following is the initial conceptual model. The exact schema will be
-refined during the database-design milestone.
+### Tenancy model
 
-### Main entities
+Use a shared schema with `tenant_id` on every tenant-owned business row. Platform-level records such as the global user identity and the tenant registry are exceptions. A global user can belong to multiple tenants through `tenant_memberships`.
 
-  -----------------------------------------------------------------------
-  Entity                              Important fields / relationships
-  ----------------------------------- -----------------------------------
-  users                               id, name, email, password_hash,
-                                      role_id, status
+Core platform tables:
 
-  roles                               id, name
+- `tenants`: company/workspace record, slug, status, plan, created timestamp.
+- `users`: global identity, normalized email, password hash or external identity reference, status.
+- `tenant_memberships`: `(tenant_id, user_id)`, membership status, joined timestamp.
+- `roles`: tenant-scoped role definitions (or system roles with an explicit scope).
+- `permissions`: stable permission keys, e.g. `inventory.adjust`.
+- `role_permissions`: permission grants for a role.
+- `membership_roles`: roles assigned to a membership.
+- `tenant_settings`: tenant-specific preferences and configuration.
 
-  permissions                         id, key, description
+Tenant-owned business tables:
 
-  role_permissions                    role_id, permission_id
+- `categories`, `products`
+- `customers`, `suppliers`, `warehouses`
+- `inventory_balances`, `inventory_movements`
+- `purchase_orders`, `purchase_order_items`, `purchase_receipts`, `purchase_receipt_items`
+- `sales_orders`, `sales_order_items`
+- `invoices`, `invoice_items`
+- `audit_logs`, `idempotency_keys`, `outbox_events`
 
-  categories                          id, name, description
+### Example relationship shape
 
-  products                            id, sku, name, category_id,
-                                      unit_price, cost_price, active
+```text
+users
+  | 1
+  | many
+ tenant_memberships ---- tenants
+          |                 |
+          |                 +---- products / customers / suppliers
+          |                 +---- warehouses / inventory
+          |                 +---- purchase_orders / sales_orders
+          |                 +---- invoices / audit_logs
+          |
+      membership_roles ---- roles ---- role_permissions ---- permissions
+```
 
-  customers                           id, name, email, phone, address
+### Tenant-aware schema rules
 
-  suppliers                           id, name, email, phone, address
+Every tenant-owned table should include `tenant_id NOT NULL`. Use tenant-scoped unique constraints and foreign keys. For example:
 
-  warehouses                          id, name, location
+```sql
+CREATE TABLE products (
+    id          UUID NOT NULL,
+    tenant_id   UUID NOT NULL REFERENCES tenants(id),
+    sku         TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    unit_price  NUMERIC(19, 4) NOT NULL CHECK (unit_price >= 0),
+    active      BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, id),
+    UNIQUE (tenant_id, sku)
+);
 
-  inventory_balances                  product_id, warehouse_id, quantity
+CREATE INDEX products_tenant_created_idx
+    ON products (tenant_id, created_at DESC);
 
-  inventory_movements                 product_id, warehouse_id,
-                                      movement_type, quantity_delta,
-                                      reference, created_by, created_at
+CREATE INDEX products_tenant_name_idx
+    ON products (tenant_id, name);
+```
 
-  purchase_orders                     id, supplier_id, status,
-                                      order_date, expected_date
+For references between tenant-owned records, use composite foreign keys so a row cannot reference another tenant's record even if application code has a bug:
 
-  purchase_order_items                purchase_order_id, product_id,
-                                      ordered_quantity,
-                                      received_quantity, unit_cost
+```sql
+CREATE TABLE customers (
+    id UUID NOT NULL,
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    name TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, id)
+);
 
-  sales_orders                        id, customer_id, status,
-                                      order_date, total_amount
+ALTER TABLE sales_orders
+    ADD CONSTRAINT sales_orders_customer_same_tenant_fk
+    FOREIGN KEY (tenant_id, customer_id)
+    REFERENCES customers (tenant_id, id);
+```
 
-  sales_order_items                   sales_order_id, product_id,
-                                      quantity, unit_price
+Adapt exact keys and constraints to the final migration design. UUIDs are useful identifiers but do **not** provide tenant isolation by themselves.
 
-  invoices                            id, sales_order_id, invoice_number,
-                                      status, total_amount, issued_at
+### Tenant isolation: defense in depth
 
-  audit_logs                          id, actor_id, action, entity_type,
-                                      entity_id, before_data, after_data,
-                                      created_at
-  -----------------------------------------------------------------------
+Use all of the following:
+
+1. **Authorization:** verify active membership and permission before a tenant operation.
+2. **Repository scoping:** every tenant-owned query includes `tenant_id = $tenantID`; avoid unscoped generic repository methods.
+3. **Composite constraints:** composite primary/unique keys and foreign keys prevent cross-tenant references.
+4. **PostgreSQL Row-Level Security (RLS):** enable policies on tenant-owned tables as a second boundary.
+5. **Isolation tests:** explicitly test that Tenant A cannot read, update, delete, or reference Tenant B's rows.
+
+Example RLS policy pattern:
+
+```sql
+ALTER TABLE products ENABLE ROW LEVEL SECURITY;
+ALTER TABLE products FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY products_tenant_isolation ON products
+USING (tenant_id = current_setting('app.tenant_id', true)::uuid)
+WITH CHECK (tenant_id = current_setting('app.tenant_id', true)::uuid);
+```
+
+At the start of **every transaction**, set the tenant value transaction-locally, for example with `SELECT set_config('app.tenant_id', $1, true)`. The final `true` makes the setting local to the transaction, preventing tenant context from leaking through pooled connections. Do not use session-level `SET` on pooled connections. The application database role must not own the protected tables and must not have `BYPASSRLS`; use a separate migration/owner role. RLS is defense in depth, not a substitute for explicit authorization and query scoping.
+
+### Key business tables and fields
+
+| Table | Important fields / relationships |
+|---|---|
+| `products` | tenant_id, id, sku, name, category_id, unit_price, cost_price, active |
+| `customers` | tenant_id, id, name, email, phone |
+| `suppliers` | tenant_id, id, name, email, phone |
+| `warehouses` | tenant_id, id, name, location |
+| `inventory_balances` | tenant_id, warehouse_id, product_id, quantity; unique per tenant/warehouse/product |
+| `inventory_movements` | tenant_id, id, warehouse_id, product_id, movement_type, quantity_delta, reference, actor_id, created_at |
+| `purchase_orders` | tenant_id, id, supplier_id, status, order_date, expected_date |
+| `purchase_order_items` | tenant_id, id, purchase_order_id, product_id, ordered_quantity, received_quantity, unit_cost |
+| `sales_orders` | tenant_id, id, customer_id, status, order_date, total_amount |
+| `sales_order_items` | tenant_id, id, sales_order_id, product_id, quantity, unit_price |
+| `invoices` | tenant_id, id, sales_order_id, invoice_number, status, total_amount, issued_at |
+| `audit_logs` | tenant_id, id, actor_id, action, entity_type, entity_id, before_data, after_data, created_at |
+
+Use `NUMERIC`/decimal-safe handling for money, never floating point. Define currency and rounding policy before invoice implementation. Decide whether invoice numbers are unique per tenant or globally; a tenant-scoped sequence/numbering strategy is usually appropriate.
+
+### Indexing and pagination
+
+- Most business indexes begin with `tenant_id`, followed by the filter/order columns used by real queries.
+- Add composite indexes for common access patterns, e.g. `(tenant_id, status, created_at DESC)` or `(tenant_id, warehouse_id, product_id)`.
+- Use cursor/keyset pagination for large tables; use a stable ordering such as `(created_at, id)` and include tenant scope in the query.
+- Do not add indexes speculatively. Validate with `EXPLAIN (ANALYZE, BUFFERS)` and representative tenant data.
+- Keep tenant IDs in cache keys and background-job payloads. Never share tenant-specific cached values under a key that omits tenant identity.
+
+## 7. API design
+
+All application endpoints are versioned under `/api/v1`. Tenant context can be expressed as `/api/v1/tenants/{tenantID}/...` or resolved from a verified tenant subdomain/header. Pick one public convention and use it consistently. Regardless of convention, the backend verifies membership; the URL/header is only a selector, not authorization.
+
+Suggested platform endpoints:
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| POST | `/auth/login` | Authenticate |
+| POST | `/auth/refresh` | Rotate/refresh session credentials |
+| POST | `/auth/logout` | Revoke session |
+| GET | `/users/me` | Current global user |
+| GET | `/me/tenants` | Tenants available to current user |
+| POST | `/tenants` | Create a tenant/workspace |
+| GET | `/tenants/{tenantID}/members` | List tenant members |
+| POST | `/tenants/{tenantID}/invitations` | Invite a member |
+
+Tenant-scoped resources:
+
+- `/api/v1/tenants/{tenantID}/products`
+- `/api/v1/tenants/{tenantID}/categories`
+- `/api/v1/tenants/{tenantID}/inventory`
+- `/api/v1/tenants/{tenantID}/inventory/movements`
+- `/api/v1/tenants/{tenantID}/warehouses`
+- `/api/v1/tenants/{tenantID}/customers`
+- `/api/v1/tenants/{tenantID}/suppliers`
+- `/api/v1/tenants/{tenantID}/purchase-orders`
+- `/api/v1/tenants/{tenantID}/sales-orders`
+- `/api/v1/tenants/{tenantID}/invoices`
+- `/api/v1/tenants/{tenantID}/reports/...`
+
+API requirements:
+
+- Validate input and enforce authorization server-side.
+- Use consistent error responses and request IDs.
+- Support filtering, sorting, and cursor pagination on list endpoints.
+- Apply per-user and per-tenant rate limits where appropriate.
+- Use idempotency keys for retryable business writes.
+- Publish an OpenAPI specification.
+- Avoid leaking whether another tenant's resource exists; return a consistent not-found/forbidden policy.
+
+## 8. Business consistency and concurrency
+
+### Safe stock deduction
+
+A sale must not allow concurrent requests to sell the same final unit. Use a transaction and either lock the relevant balance row with `SELECT ... FOR UPDATE` or use a conditional atomic update that only decrements when enough stock remains. Verify affected-row counts. For multi-product orders, lock rows in a consistent sorted order to reduce deadlocks. Keep transactions short.
+
+### Atomic sales confirmation
+
+Within one transaction:
+
+1. Validate order state and tenant ownership.
+2. Lock/check required inventory balances.
+3. Deduct stock.
+4. Insert inventory movements.
+5. Create invoice and invoice lines.
+6. Update order status and write audit/outbox records.
+7. Commit.
+
+Any failure rolls back the whole workflow.
+
+### Idempotency and outbox
+
+For operations such as sales confirmation, purchase receipts, and payment callbacks, persist an idempotency key scoped by tenant and operation. A repeated key returns the original result rather than applying the operation twice.
+
+When a committed transaction must trigger asynchronous work (email, export, webhook), insert an `outbox_events` row in the same transaction. A worker publishes/processes it and marks it complete with retry/backoff. This avoids the dual-write bug where the database commits but event publication fails. Start with PostgreSQL-backed outbox polling; introduce a dedicated broker only when measured throughput or delivery requirements justify it.
 
 ### Inventory ledger
 
-Inventory should not be represented only by a mutable quantity field on
-the product.
+`inventory_movements` is the append-only source of truth. `inventory_balances` is a transactionally maintained projection for fast reads. Update both in the same transaction and periodically reconcile balances against the movement ledger.
 
-Use an append-only inventory movement ledger. Each movement records a
-change in stock:
+## 9. Capacity and performance plan
 
-  Event               Product     Quantity delta
-  ------------------- --------- ----------------
-  Opening stock       Laptop                 +20
-  Purchase received   Laptop                 +10
-  Sale confirmed      Laptop                  -3
-  Damaged stock       Laptop                  -1
-  Sale returned       Laptop                  +1
+### Workload assumptions
 
-The current quantity for a product in a warehouse is the sum of its
-movements. For efficient reads, maintain an `inventory_balances` table
-as a transactionally updated projection/cache of that ledger.
+The initial test profile should represent 1,000 simultaneously active users across multiple tenants, with a deliberately uneven tenant distribution (a few larger tenants and many smaller tenants). Start with this approximate scenario:
 
-The balance and movement record must be updated in the same transaction.
-Add reconciliation tests or a maintenance query that compares the
-balance with the movement sum.
+- 1,000 active user sessions.
+- 100–200 sustained requests/second during normal peak activity.
+- 500 requests/second during a short burst test.
+- A mixed workload: catalog/inventory reads, dashboard/list queries, order creation, purchase receipts, and sales confirmation.
+- A small number of report/export requests running concurrently; heavy exports should be asynchronous.
 
-### Important database constraints and indexes
+Treat 200 sustained RPS as the initial benchmark target, not as a guaranteed conversion from 1,000 active users. Refine the request rate using observed usage patterns and load-test results.
 
-Plan for constraints such as:
+### Scaling strategy
 
--   Unique product SKU.
--   Unique user email.
--   Unique invoice number.
--   Positive ordered and received quantities.
--   Non-negative stock balance, unless a documented business rule
-    permits backorders.
--   Foreign keys for all required relationships.
--   Indexes on foreign keys and frequently filtered fields.
--   Indexes on order status/date, product SKU, and inventory
-    product/warehouse keys.
+**Go API:** Run multiple stateless replicas behind a load balancer. Scale replicas based on CPU, memory, request queue/latency, and in-flight requests. Use graceful shutdown and readiness checks so deployments do not drop in-flight work.
 
-Use appropriate `NUMERIC`/decimal handling for monetary values. Do not
-use floating-point types for money. Define the currency and rounding
-policy explicitly before implementing invoice totals.
+**PostgreSQL:** Start with one well-provisioned primary and connection pooling. PostgreSQL is the source of truth. Tune based on query plans, lock waits, CPU, memory, storage latency, and connection utilization. Add a read replica only when read pressure is measured and the application can tolerate replica lag. Inventory decisions and read-after-write flows must use the primary.
 
-------------------------------------------------------------------------
+**Connection management:** Use `pgxpool` with explicit limits and timeouts. Set the maximum pool size per API replica so the sum of all replica pools plus workers stays within the database's connection budget. Do not let every replica independently open an unbounded pool. Consider PgBouncer if connection churn or connection count becomes a bottleneck.
 
-## 7. API outline
+**Redis:** Add only for measured use cases such as short-lived catalog/config caching or distributed rate limiting. PostgreSQL remains the source of truth. Cache keys must include tenant identity, and invalidation must be explicit. Never cache authorization decisions for longer than the security model safely permits.
 
-All endpoints will be versioned under `/api/v1`.
+**Background workers:** Move slow or non-interactive tasks (reports, exports, notifications, webhook delivery) out of request handlers. Use bounded concurrency, retries with backoff, dead-letter handling, and tenant-aware job payloads. Do not run an unbounded goroutine per task.
 
-The following is an initial API plan, not a claim that these endpoints
-already exist.
+**Reports:** Start with indexed queries and date-bounded reports. For expensive reports, enqueue a job and provide a downloadable result. Consider pre-aggregated tables/materialized views only after profiling.
 
-### Authentication and users
+### Initial deployment sizing (starting point only)
 
-  -----------------------------------------------------------------------
-  Method                  Endpoint                Purpose
-  ----------------------- ----------------------- -----------------------
-  POST                    `/auth/login`           Authenticate a user
+A reasonable first staging/production experiment—not a final sizing guarantee—is:
 
-  POST                    `/auth/refresh`         Refresh an access
-                                                  token, if refresh
-                                                  tokens are adopted
+| Component | Starting configuration | Scale trigger |
+|---|---|---|
+| Load balancer / ingress | Managed HTTPS load balancer | Availability, routing, WAF needs |
+| Go API | 2–3 replicas, each initially 2–4 vCPU and 2–4 GB RAM | CPU sustained above ~65–70%, rising p95 latency, or saturation in-flight requests |
+| PostgreSQL primary | Managed PostgreSQL, initially 4–8 vCPU and 16–32 GB RAM, SSD storage | CPU/IO saturation, lock waits, slow queries, connection pressure |
+| Redis | Small managed instance only when introduced | Cache/rate-limit workload justifies it |
+| Worker | 1–2 replicas, bounded concurrency | Queue/outbox lag and task completion time |
+| Object storage | Managed object storage when exports/uploads are added | File storage requirement |
 
-  POST                    `/auth/logout`          Revoke or invalidate a
-                                                  session
+These are starting ranges for benchmarking, not universal minimums. Cloud provider, database version, storage IOPS, data size, and query mix can change the result substantially. Prefer managed PostgreSQL with automated backups and point-in-time recovery for a serious hosted deployment.
 
-  GET                     `/users/me`             Get current user
+### Performance engineering rules
 
-  GET                     `/users`                List users (permission
-                                                  protected)
+- Measure p50, p95, and p99 latency by endpoint and tenant.
+- Track throughput, error rate, CPU, memory, DB pool wait time, DB connections, slow queries, lock waits, and worker queue age.
+- Set request, query, and transaction timeouts.
+- Avoid N+1 queries and unbounded list endpoints.
+- Use cursor pagination and bounded response sizes.
+- Keep API instances stateless and avoid sticky sessions.
+- Test both average tenant data and a “large tenant” dataset to detect noisy-neighbor problems.
+- Establish per-tenant rate limits and quotas before one tenant can monopolize shared resources.
 
-  POST                    `/users`                Create user
+## 10. Infrastructure and deployment
 
-  PATCH                   `/users/{id}`           Update user
-  -----------------------------------------------------------------------
+### Environments
 
-### Products and categories
+- **Local:** Docker Compose for PostgreSQL and optional Redis; Go API and React dev server.
+- **CI:** lint, unit tests, integration tests against PostgreSQL, migration validation, build, and dependency/security checks.
+- **Staging:** production-like topology with seeded multi-tenant data; run smoke and load tests here.
+- **Production:** HTTPS load balancer, multiple API replicas, managed PostgreSQL, backups/PITR, secrets manager, centralized logs/metrics, and alerting.
 
-  Method   Endpoint           Purpose
-  -------- ------------------ ----------------------
-  GET      `/products`        List/search products
-  POST     `/products`        Create product
-  GET      `/products/{id}`   Get product
-  PATCH    `/products/{id}`   Update product
-  GET      `/categories`      List categories
-  POST     `/categories`      Create category
+### Production topology
 
-### Inventory
+```text
+                 Internet
+                    |
+             DNS / CDN / WAF
+                    |
+          Managed HTTPS load balancer
+                    |
+          +---------+---------+
+          |         |         |
+        API-1     API-2     API-N
+          |         |         |
+          +---------+---------+
+                    |
+             PostgreSQL primary
+               |          |
+          Outbox table   Read replica
+               |
+         Go worker pool
 
-  Method   Endpoint                   Purpose
-  -------- -------------------------- ---------------------------
-  GET      `/inventory`               Query stock balances
-  GET      `/inventory/movements`     View movement history
-  POST     `/inventory/adjustments`   Record a stock adjustment
-  GET      `/warehouses`              List warehouses
-  POST     `/warehouses`              Create warehouse
+     Optional Redis / Object storage
+```
 
-### Customers and suppliers
+### Deployment and operations requirements
 
-  Method        Endpoint            Purpose
-  ------------- ------------------- -----------------------------
-  GET / POST    `/customers`        List or create customers
-  GET / PATCH   `/customers/{id}`   Retrieve or update customer
-  GET / POST    `/suppliers`        List or create suppliers
-  GET / PATCH   `/suppliers/{id}`   Retrieve or update supplier
+- Use container images with non-root runtime users and multi-stage builds.
+- Keep secrets out of images, source control, and logs; use a secrets manager in hosted environments.
+- Apply migrations as a controlled deployment step, not independently from every API replica at startup.
+- Use backward-compatible expand/migrate/contract schema changes for rolling deployments.
+- Add liveness and readiness endpoints; readiness should fail when the instance cannot safely serve traffic.
+- Configure graceful shutdown and bounded request draining.
+- Automate backups and test restoration, not just backup creation.
+- Use infrastructure-as-code when the deployment target is selected.
+- Keep a rollback procedure and document recovery objectives.
 
-### Purchasing
+Kubernetes is deliberately not required for this target. Start with managed containers or a simple container platform. Add Kubernetes only if operational requirements or deployment complexity justify it.
 
-  Method       Endpoint                           Purpose
-  ------------ ---------------------------------- --------------------------------
-  GET / POST   `/purchase-orders`                 List or create purchase orders
-  GET          `/purchase-orders/{id}`            Get purchase order
-  POST         `/purchase-orders/{id}/submit`     Submit purchase order
-  POST         `/purchase-orders/{id}/receipts`   Record received quantities
+## 11. Repository structure
 
-### Sales and invoices
-
-  Method       Endpoint                       Purpose
-  ------------ ------------------------------ ---------------------------------
-  GET / POST   `/sales-orders`                List or create sales orders
-  GET          `/sales-orders/{id}`           Get sales order
-  POST         `/sales-orders/{id}/confirm`   Confirm sale and deduct stock
-  POST         `/sales-orders/{id}/cancel`    Cancel sale under defined rules
-  GET          `/invoices`                    List invoices
-  GET          `/invoices/{id}`               Get invoice
-
-### Reports
-
-  Method   Endpoint                         Purpose
-  -------- -------------------------------- ----------------------------------
-  GET      `/reports/sales-summary`         Sales totals over a date range
-  GET      `/reports/top-products`          Best-selling products
-  GET      `/reports/low-stock`             Products below reorder threshold
-  GET      `/reports/inventory-valuation`   Inventory value summary
-
-Use pagination, filtering, sorting, consistent error responses, and
-request validation for collection endpoints.
-
-------------------------------------------------------------------------
-
-## 8. Business rules and consistency
-
-This section is central to the quality of the project.
-
-### 8.1 Safe stock deduction
-
-A sale must not allow two concurrent requests to sell the same final
-unit.
-
-Use a database transaction and a concurrency-control strategy such as:
-
--   Lock the relevant inventory balance row with
-    `SELECT ... FOR UPDATE`, then validate and update it; or
--   Use a conditional atomic update that decrements stock only when
-    sufficient quantity remains, and verify the affected row count.
-
-Choose one approach, document it, and test it with concurrent requests.
-
-### 8.2 Atomic sales confirmation
-
-The following operations should succeed or fail together:
-
-1.  Validate order status.
-2.  Validate and deduct stock.
-3.  Insert inventory movement records.
-4.  Create the invoice.
-5.  Update the sales order status.
-
-If any operation fails, roll back the transaction.
-
-### 8.3 Partial purchase receipts
-
-Track ordered and received quantities separately. A purchase order is
-fully received only when all items have been received. Receiving the
-same delivery twice must not accidentally increase stock twice.
-
-### 8.4 Idempotency
-
-For operations that may be retried by a client, especially order
-confirmation and receipt creation, consider an idempotency key or
-another duplicate-request protection mechanism. A retry must not create
-duplicate stock movements or invoices.
-
-### 8.5 Auditability
-
-Record important actions with the actor, timestamp, action, affected
-entity, and relevant before/after values. Avoid storing passwords,
-tokens, or other secrets in audit records.
-
-------------------------------------------------------------------------
-
-## 9. Repository structure
-
-Suggested monorepo structure:
-
-``` text
+```text
 nexuserp/
 ├── backend/
 │   ├── cmd/
-│   │   └── api/
-│   │       └── main.go
+│   │   ├── api/main.go
+│   │   └── worker/main.go
 │   ├── internal/
-│   │   ├── auth/
-│   │   ├── users/
+│   │   ├── platform/       # tenant registry, identity, memberships
+│   │   ├── auth/           # sessions and authentication
+│   │   ├── authorization/  # tenant-scoped RBAC
 │   │   ├── products/
 │   │   ├── categories/
 │   │   ├── inventory/
@@ -565,7 +535,9 @@ nexuserp/
 │   │   ├── sales/
 │   │   ├── invoices/
 │   │   ├── reports/
-│   │   └── audit/
+│   │   ├── audit/
+│   │   ├── outbox/
+│   │   └── platformhttp/   # middleware, request context, health
 │   ├── db/
 │   │   ├── migrations/
 │   │   ├── queries/
@@ -580,474 +552,313 @@ nexuserp/
 │   ├── public/
 │   └── package.json
 ├── deployments/
-│   └── docker-compose.yml
+│   ├── docker-compose.yml
+│   └── production/         # deployment/IaC configuration later
 ├── docs/
-│   ├── architecture/
-│   ├── database/
+│   ├── architecture/       # ADRs and diagrams
+│   ├── database/            # ERD and isolation model
+│   ├── operations/          # runbooks and recovery
 │   └── api/
-├── .github/
-│   └── workflows/
+├── load-tests/              # k6 scenarios and datasets
+├── .github/workflows/
 ├── .env.example
 └── README.md
 ```
 
-Keep generated sqlc code separate from handwritten SQL queries. Do not
-edit generated files directly.
+## 12. Milestones and implementation plan
 
-------------------------------------------------------------------------
+Plan for **10–12 weeks of focused part-time work** as a realistic first pass. The schedule is an estimate; tenant isolation and concurrency correctness deserve more time than adding extra screens. Keep a working vertical slice at every stage.
 
-## 10. Milestones and implementation plan
+### Milestone 0 — Product, tenancy, and architecture design
 
-The milestones are ordered to reduce rework: define the data model
-first, build one complete business workflow, then expand the system.
+- [ ] Define the target customer and initial ERP workflows.
+- [ ] Confirm shared-schema multi-tenancy and document why.
+- [ ] Define tenant lifecycle: creation, invitation, membership removal, suspension.
+- [ ] Define user identity vs tenant membership vs tenant role.
+- [ ] Draw ERD with `tenant_id` on every tenant-owned entity.
+- [ ] Define composite keys/foreign keys and tenant-aware indexes.
+- [ ] Decide tenant resolution convention (tenant URL path or subdomain).
+- [ ] Write ADRs for RLS, auth/session strategy, outbox, and deployment approach.
+- [ ] Define the 1,000-active-user workload and load-test scenarios.
 
-A reasonable target is **6--8 weeks of part-time development**,
-depending on prior Go experience and the amount of frontend work. The
-estimate is a planning guide, not a deadline.
+**Deliverables:** ERD, tenancy threat model, architecture diagram, ADRs, workflow diagrams, API outline, capacity assumptions.
 
-### Milestone 0 --- Requirements and design
+**Acceptance:** Explain how every request is associated with a tenant and why one tenant cannot access another tenant's records.
 
-**Goal:** Agree on the business rules and design before writing
-application code.
+### Milestone 1 — Go foundation and development environment
 
-Tasks:
+- [ ] Create Go module and Chi server.
+- [ ] Add pgxpool and PostgreSQL Docker Compose service.
+- [ ] Add environment-based config, structured logs, request IDs, graceful shutdown.
+- [ ] Add liveness/readiness endpoints and HTTP timeouts.
+- [ ] Add migrations and sqlc generation.
+- [ ] Add CI for formatting, vet, lint, and build.
 
--   [ ] Define the example business and its workflows.
--   [ ] Finalize MVP scope and non-goals.
--   [ ] Draw the ER diagram.
--   [ ] Define entities, relationships, constraints, and indexes.
--   [ ] Define product, order, invoice, and purchase-order statuses.
--   [ ] Decide how stock reservations, sales cancellation, and returns
-    work.
--   [ ] Define money precision, currency, and rounding policy.
--   [ ] Draft API routes and request/response examples.
--   [ ] Record important decisions in short architecture decision
-    records (ADRs).
+**Deliverables:** Runnable API, database, migrations, sqlc pipeline, CI.
 
-**Deliverables:** Requirements, ERD, workflow diagrams, initial API
-specification, and a prioritized backlog.
+**Acceptance:** A fresh clone can start locally and pass automated checks.
 
-**Acceptance criteria:** The sales and purchasing workflows can be
-explained end-to-end, including failure and cancellation cases.
+### Milestone 2 — Identity, tenant lifecycle, and isolation foundation
 
-### Milestone 1 --- Go backend foundation
+- [ ] Implement global users and secure password/session handling.
+- [ ] Implement tenant creation and tenant membership.
+- [ ] Implement invitations and membership status transitions.
+- [ ] Implement tenant-scoped roles, permissions, and membership-role assignments.
+- [ ] Add tenant resolution and membership-verification middleware.
+- [ ] Add transaction helper that sets transaction-local RLS context.
+- [ ] Enable RLS on initial tenant-owned tables; use a non-owner application DB role.
+- [ ] Add composite tenant-aware keys and foreign keys.
+- [ ] Add cross-tenant isolation integration tests, including pooled-connection reuse.
 
-**Goal:** Create a runnable backend with a reliable development
-environment.
+**Deliverables:** Identity and tenant foundation with verified isolation.
 
-Tasks:
+**Acceptance:** A user can belong to two tenants; switching context works; access to another tenant's records is denied even when IDs are guessed or requests are manipulated.
 
--   [ ] Install and configure Go.
--   [ ] Create the Go module.
--   [ ] Add Chi and pgx.
--   [ ] Configure PostgreSQL through Docker Compose.
--   [ ] Add environment-based configuration.
--   [ ] Add database connection handling and graceful shutdown.
--   [ ] Add structured logging.
--   [ ] Add health and readiness endpoints.
--   [ ] Set up database migrations.
--   [ ] Set up sqlc and generate code from a sample query.
--   [ ] Add formatting, linting, and basic CI checks.
+### Milestone 3 — Master data and tenant-scoped CRUD
 
-**Deliverables:** A running Go API, PostgreSQL service, migrations, and
-automated build checks.
+- [ ] Implement categories and products.
+- [ ] Implement customers and suppliers.
+- [ ] Enforce tenant-scoped unique SKU and appropriate constraints.
+- [ ] Implement cursor pagination, filtering, and sorting.
+- [ ] Add tenant-aware indexes based on expected queries.
+- [ ] Add frontend tenant switcher and protected routes.
 
-**Acceptance criteria:** A developer can clone the repository, configure
-environment variables, start the services, apply migrations, and call
-the health endpoint using documented commands.
+**Deliverables:** Tenant-isolated catalog and master-data APIs/UI.
 
-### Milestone 2 --- Database and identity
+**Acceptance:** Duplicate SKUs are rejected within a tenant but can exist in different tenants; list endpoints never mix tenant data.
 
-**Goal:** Establish the core schema and protect API access.
+### Milestone 4 — Inventory ledger and warehouses
 
-Tasks:
+- [ ] Implement warehouses and tenant-scoped inventory balances.
+- [ ] Implement append-only inventory movements.
+- [ ] Add opening stock and authorized adjustments.
+- [ ] Implement atomic balance + movement updates.
+- [ ] Add stock lookup and movement history.
+- [ ] Add reconciliation query/test.
+- [ ] Add concurrency tests for competing stock updates.
 
--   [ ] Implement users, roles, and permissions.
--   [ ] Implement password hashing using a suitable password-hashing
-    algorithm.
--   [ ] Implement login and logout/session behavior.
--   [ ] Add authentication middleware.
--   [ ] Add authorization checks for protected operations.
--   [ ] Add request validation and a consistent error format.
--   [ ] Add audit-log infrastructure.
--   [ ] Write tests for authentication and permission boundaries.
+**Deliverables:** Correct inventory module.
 
-**Deliverables:** Initial schema, authentication endpoints,
-authorization middleware, and tests.
+**Acceptance:** Every stock change is auditable and tenant-isolated; balance projections match the ledger.
 
-**Acceptance criteria:** Unauthenticated users cannot access protected
-endpoints, and users cannot perform actions beyond their assigned
-permissions.
+### Milestone 5 — Purchasing and receiving
 
-### Milestone 3 --- Product catalog and master data
+- [ ] Implement purchase orders and line items.
+- [ ] Implement submit and partial receipt flows.
+- [ ] Ensure supplier/product references are in the same tenant.
+- [ ] Update inventory transactionally on receipt.
+- [ ] Add tenant-scoped idempotency for receipt submission.
+- [ ] Add rollback, duplicate-retry, and partial-receipt tests.
 
-**Goal:** Implement the data that business operations depend on.
+**Deliverables:** End-to-end purchasing workflow.
 
-Tasks:
+**Acceptance:** Partial and repeated receipts behave correctly without cross-tenant references or duplicate stock increases.
 
--   [ ] Create categories.
--   [ ] Create, retrieve, update, and deactivate products.
--   [ ] Enforce unique SKUs.
--   [ ] Store monetary values using decimal-safe database types.
--   [ ] Implement customer management.
--   [ ] Implement supplier management.
--   [ ] Add pagination, filtering, and search.
--   [ ] Add validation and integration tests.
+### Milestone 6 — Sales and invoicing
 
-**Deliverables:** Working product, category, customer, and supplier
-APIs.
+- [ ] Implement sales orders and line items.
+- [ ] Confirm orders in a single transaction.
+- [ ] Prevent overselling using row locks or conditional atomic updates.
+- [ ] Create invoices and invoice lines transactionally.
+- [ ] Implement cancellation and compensating stock movements.
+- [ ] Add idempotency and concurrent-sale tests.
 
-**Acceptance criteria:** Records have valid relationships, duplicate
-SKUs are rejected, and list endpoints support predictable pagination and
-filtering.
+**Deliverables:** Transaction-safe sales and invoice workflow.
 
-### Milestone 4 --- Inventory management
+**Acceptance:** No overselling under concurrency; failed operations leave no partial business changes; tenant boundaries hold throughout the workflow.
 
-**Goal:** Build reliable stock tracking.
+### Milestone 7 — Frontend, reporting, and tenant administration
 
-Tasks:
+- [ ] Build dashboard, tenant switcher, member/role management.
+- [ ] Build product, customer, supplier, warehouse, and inventory screens.
+- [ ] Build purchasing, receiving, sales, and invoice screens.
+- [ ] Add sales summary, top products, low-stock, and valuation reports.
+- [ ] Add loading, empty, validation, and error states.
+- [ ] Ensure all frontend requests carry the selected tenant context safely.
 
--   [ ] Implement warehouses.
--   [ ] Implement inventory balances.
--   [ ] Implement the inventory movement ledger.
--   [ ] Add opening-stock functionality.
--   [ ] Add authorized stock adjustments with reasons.
--   [ ] Add stock lookup by product and warehouse.
--   [ ] Add movement history and filtering.
--   [ ] Implement a reconciliation query/test comparing balances with
-    movement totals.
+**Deliverables:** Usable SaaS UI for the main workflows.
 
-**Deliverables:** Inventory APIs, movement history, balance updates, and
-reconciliation checks.
+**Acceptance:** Users can switch tenants and complete core workflows without seeing cross-tenant data.
 
-**Acceptance criteria:** Every stock change creates a corresponding
-movement, and the balance projection remains consistent with the ledger.
+### Milestone 8 — Reliability, background work, and observability
 
-### Milestone 5 --- Purchasing workflow
+- [ ] Add transactional outbox table and worker process.
+- [ ] Move report exports and notifications to background jobs.
+- [ ] Add bounded retries, backoff, and failed-job handling.
+- [ ] Add Prometheus metrics and Grafana dashboards.
+- [ ] Track request latency, errors, DB pool wait, DB connections, query latency, lock waits, and worker lag.
+- [ ] Add structured logs and trace/request correlation.
+- [ ] Add per-tenant rate limits and basic noisy-neighbor protections.
 
-**Goal:** Make it possible to replenish inventory from suppliers.
+**Deliverables:** Observable API and reliable asynchronous processing.
 
-Tasks:
+**Acceptance:** Background work survives API restarts and failures; key saturation signals are visible.
 
--   [ ] Create purchase orders and purchase-order items.
--   [ ] Implement draft and submitted states.
--   [ ] Validate supplier and product references.
--   [ ] Record full and partial receipts.
--   [ ] Update inventory balances and movements transactionally.
--   [ ] Prevent duplicate receipt processing.
--   [ ] Track outstanding quantities and purchase status.
--   [ ] Add tests for partial receipt and transaction rollback.
+### Milestone 9 — Performance and 1,000-user load validation
 
-**Deliverables:** Complete purchase-order and receiving workflow.
+- [ ] Create representative multi-tenant seed data, including large and small tenants.
+- [ ] Write k6 scenarios for login/session use, reads, writes, sales, receiving, and reports.
+- [ ] Simulate 1,000 active users with realistic think time.
+- [ ] Test 100–200 sustained RPS and a 500 RPS burst profile.
+- [ ] Measure p50/p95/p99 latency, throughput, errors, CPU, memory, DB pool wait, locks, and slow queries.
+- [ ] Run tenant-isolation tests under concurrent load.
+- [ ] Profile slow queries and inspect EXPLAIN ANALYZE plans.
+- [ ] Tune indexes, connection pools, API replicas, and database resources based on evidence.
+- [ ] Record test environment, dataset, results, bottlenecks, and limitations in `docs/`.
 
-**Acceptance criteria:** Receiving stock increases inventory exactly
-once, supports partial deliveries, and preserves a traceable purchase
-history.
+**Deliverables:** Repeatable load-test suite and capacity report.
 
-### Milestone 6 --- Sales and invoicing workflow
+**Acceptance:** The target workload meets the documented latency/error objectives in the test environment, or the report clearly identifies the remaining bottleneck and next tuning step. Do not claim 1,000-user support without publishing measured results.
 
-**Goal:** Implement the most important end-to-end business operation.
+### Milestone 10 — Production deployment and operational readiness
 
-Tasks:
+- [ ] Deploy multiple stateless API replicas behind HTTPS load balancing.
+- [ ] Use managed PostgreSQL with automated backups and point-in-time recovery.
+- [ ] Configure secrets, network restrictions, TLS, and least-privilege DB roles.
+- [ ] Add deployment health checks, graceful shutdown, and rollback procedure.
+- [ ] Validate migration compatibility during rolling deployments.
+- [ ] Test database restore and document recovery procedure.
+- [ ] Add alerting for error rate, latency, saturation, DB health, and worker lag.
+- [ ] Publish OpenAPI docs, screenshots, demo data, and a short product demo.
+- [ ] Document architecture, setup, load-test results, and known limitations.
 
--   [ ] Create sales orders and order items.
--   [ ] Validate prices and quantities on the server.
--   [ ] Check stock availability.
--   [ ] Confirm sales inside a database transaction.
--   [ ] Prevent overselling under concurrent requests.
--   [ ] Create invoice records.
--   [ ] Implement cancellation and compensating stock movements.
--   [ ] Add duplicate-request protection where appropriate.
--   [ ] Test rollback when any critical step fails.
+**Deliverables:** Deployed, observable, documented portfolio release.
 
-**Deliverables:** Sales APIs, invoice records, and transaction-safe
-order confirmation.
+**Acceptance:** Another developer can run the app locally; a reviewer can use the demo; operations and measured capacity are documented.
 
-**Acceptance criteria:** A successful sale creates the correct invoice
-and stock movements. A failed sale leaves no partial business changes.
-Concurrent sales cannot sell more stock than is available.
+### Suggested schedule
 
-### Milestone 7 --- Frontend and reporting
+| Weeks | Focus | Main result |
+|---|---|---|
+| 1 | Product and tenancy design | ERD, ADRs, capacity plan |
+| 2–3 | Go foundation, identity, tenancy, RLS | Secure tenant-aware foundation |
+| 4 | Master data | Products, customers, suppliers |
+| 5 | Inventory | Ledger and balances |
+| 6 | Purchasing | Partial receiving |
+| 7 | Sales and invoices | Transaction-safe sales |
+| 8–9 | Frontend and reporting | Usable multi-tenant application |
+| 10 | Outbox, observability, reliability | Workers and dashboards |
+| 11 | Load testing and tuning | 1,000-active-user benchmark report |
+| 12 | Deployment and documentation | Portfolio-ready release |
 
-**Goal:** Make the system usable and expose useful business information.
+If time is constrained, prioritize milestones 0–6 and a small working frontend. Do not skip tenant isolation, transaction correctness, or cross-tenant tests to add more features.
 
-Tasks:
+## 13. Testing and load validation
 
--   [ ] Set up React and TypeScript.
--   [ ] Implement login and protected routes.
--   [ ] Build a dashboard layout and navigation.
--   [ ] Build product, customer, and supplier screens.
--   [ ] Build inventory and movement-history screens.
--   [ ] Build purchase-order and receiving screens.
--   [ ] Build sales-order and invoice screens.
--   [ ] Add loading, empty, validation, and error states.
--   [ ] Add sales summary and top-product reports.
--   [ ] Add low-stock and inventory-valuation reports.
+### Unit and integration tests
 
-**Deliverables:** Usable web interface and first reporting dashboard.
+Test business rules and run persistence tests against real PostgreSQL:
 
-**Acceptance criteria:** A user can complete the core purchasing and
-sales workflows through the UI without manually editing the database.
+- Tenant membership and role authorization.
+- Cross-tenant read/update/delete/reference attempts.
+- RLS behavior with transaction-local context and pooled connections.
+- Tenant-scoped unique constraints and composite foreign keys.
+- Inventory balance/movement atomicity and reconciliation.
+- Partial receipt, duplicate idempotency key, and rollback.
+- Sales confirmation, invoice creation, cancellation, and rollback.
+- Concurrent sales competing for the last units.
+- Outbox retry and duplicate delivery behavior.
 
-### Milestone 8 --- Quality, deployment, and documentation
+### Load tests
 
-**Goal:** Make the project reproducible, testable, and demonstrable.
+Use k6 or an equivalent tool. Include realistic think time rather than issuing continuous requests from every virtual user. Test:
 
-Tasks:
+1. Ramp-up to 1,000 active virtual users.
+2. A steady-state workload at the target request rate.
+3. A short burst to 500 RPS.
+4. A mixed read/write workload across many tenants.
+5. A noisy-neighbor case where one large tenant performs heavy reads/reports.
+6. A recovery test after API replica restart or worker restart.
 
--   [ ] Expand unit and integration test coverage around critical
-    business rules.
--   [ ] Add concurrent-sale tests.
--   [ ] Add database migration checks to CI.
--   [ ] Add API documentation.
--   [ ] Add structured request logging and request IDs.
--   [ ] Review authorization and secret handling.
--   [ ] Add Dockerfiles and production-oriented Compose configuration
-    where appropriate.
--   [ ] Deploy the application and database securely.
--   [ ] Add sample/demo data.
--   [ ] Capture screenshots and record a short demo.
--   [ ] Complete architecture, setup, and API documentation.
--   [ ] Add known limitations and future improvements to the README.
+Capture the test configuration and results. A successful test should report endpoint-level p95/p99, error rate, achieved RPS, and infrastructure saturation. A test that reaches 1,000 virtual users but sends almost no requests is not proof of 1,000-user capacity.
 
-**Deliverables:** Deployed demo, automated CI, test suite, screenshots,
-and complete documentation.
+Useful Go commands:
 
-**Acceptance criteria:** Another developer can follow the README to run
-the application, understand the architecture, execute tests, and try the
-main workflows.
-
-### Suggested milestone schedule
-
-  -----------------------------------------------------------------------
-  Week                    Focus                   Main result
-  ----------------------- ----------------------- -----------------------
-  1                       Design and Go           ERD, API plan, runnable
-                          foundation              backend
-
-  2                       Database, auth, master  Users, products,
-                          data                    customers, suppliers
-
-  3                       Inventory               Ledger and stock
-                                                  balances
-
-  4                       Purchasing              Purchase orders and
-                                                  receiving
-
-  5                       Sales and invoices      Transaction-safe sales
-                                                  workflow
-
-  6                       Frontend and reports    Usable application
-
-  7                       Testing and hardening   Reliable workflows and
-                                                  CI
-
-  8                       Deployment and          Public demo and
-                          documentation           portfolio-ready repo
-  -----------------------------------------------------------------------
-
-If time is limited, prioritize milestones 0--6 and a simple frontend. Do
-not sacrifice transaction correctness just to add more screens.
-
-------------------------------------------------------------------------
-
-## 11. Testing strategy
-
-Tests should focus on business correctness, not only whether endpoints
-return HTTP 200.
-
-### Unit tests
-
-Test business rules in isolation:
-
--   Invalid product quantities are rejected.
--   Invalid order transitions are rejected.
--   Invoice totals and line totals are calculated correctly.
--   Users without the required permission are denied.
--   Purchase receipt quantities cannot exceed outstanding quantities.
-
-### Integration tests
-
-Run tests against a real PostgreSQL instance:
-
--   Product creation and SKU uniqueness.
--   Inventory balance and movement updates.
--   Purchase receipt transaction behavior.
--   Sales confirmation and invoice creation.
--   Transaction rollback after an injected failure.
--   Order cancellation and compensating stock movements.
-
-### Concurrency tests
-
-Simulate multiple employees attempting to sell the last available unit.
-Verify that no more than the available quantity can be sold and that the
-database remains consistent.
-
-### Useful commands
-
-``` bash
-# Run all Go tests
+```bash
 go test ./...
-
-# Run tests with race detection
 go test -race ./...
-
-# Format Go files
 gofmt -w .
-
-# Run static analysis
 go vet ./...
 ```
 
-Add linting and integration-test commands to the repository once the
-relevant tools and configuration are selected.
+## 14. Security, isolation, and reliability
 
-------------------------------------------------------------------------
+- Hash passwords with a suitable password-hashing algorithm; never store plaintext.
+- Use secure, revocable sessions or carefully designed access/refresh token rotation.
+- Verify tenant membership and permission on every tenant operation.
+- Never trust a client-supplied tenant ID without authorization.
+- Use RLS, composite foreign keys, and explicit tenant predicates as defense in depth.
+- Use transaction-local tenant context; never leak tenant state across pooled DB connections.
+- Run the app with a least-privilege database role that does not own protected tables or bypass RLS.
+- Keep secrets in a secrets manager in hosted environments.
+- Validate input, use parameterized SQL, and apply request/query timeouts.
+- Use HTTPS and secure cookie settings where cookies are used.
+- Do not expose internal errors or log credentials, tokens, or sensitive customer data.
+- Apply per-tenant quotas/rate limits to reduce noisy-neighbor risk.
+- Back up production data, test restoration, and document recovery objectives.
+- Treat exports, cache entries, background jobs, audit records, and object-storage paths as tenant-scoped resources too.
 
-## 12. Security and reliability
+## 15. Local development
 
-Minimum expectations:
+The exact commands and environment variables will be finalized during Milestone 1. Intended workflow:
 
--   Hash passwords; never store plaintext passwords.
--   Keep secrets in environment variables or a secrets manager.
--   Do not commit `.env` files containing real credentials.
--   Validate all incoming data on the server.
--   Enforce authorization on the backend, not only in the frontend.
--   Use parameterized SQL queries.
--   Set sensible request and database timeouts.
--   Use HTTPS in deployed environments.
--   Avoid exposing internal error details to clients.
--   Log important business actions without logging secrets.
--   Use database constraints as a final layer of data protection.
--   Back up production data and document recovery expectations.
-
-For token-based authentication, choose access-token expiry,
-refresh-token rotation/revocation, and secure cookie or client-storage
-behavior deliberately. Do not assume that JWT alone provides session
-revocation.
-
-------------------------------------------------------------------------
-
-## 13. Local development
-
-The exact commands and environment variables will be finalized during
-Milestone 1. The intended developer experience is:
-
-``` bash
-# Clone the repository
+```bash
 git clone <repository-url>
 cd nexuserp
-
-# Configure local environment
 cp .env.example .env
-
-# Start infrastructure
 docker compose -f deployments/docker-compose.yml up -d
-
-# Run database migrations
-# Add the selected migration command here.
-
-# Start the backend
+# Run database migrations using the selected migration tool.
 cd backend
 go run ./cmd/api
 ```
 
-Example environment variables:
+Example local-only configuration:
 
-``` dotenv
+```dotenv
 APP_ENV=development
 HTTP_ADDR=:8080
-
 DATABASE_URL=postgres://nexuserp:nexuserp@localhost:5432/nexuserp?sslmode=disable
-
-# Use a strong, locally generated secret.
+# Generate a local secret; never use this example in production.
 AUTH_SECRET=replace-with-a-local-development-secret
 ```
 
-These values are examples for local development only. Never use the
-example credentials or secrets in production.
+Never commit real `.env` files or production credentials. The local setup should include a seed command that creates two demo tenants and users so isolation can be tested immediately.
 
-### API documentation
-
-The API should expose an OpenAPI specification and a convenient local
-documentation page once the API contract is implemented.
-
-------------------------------------------------------------------------
-
-## 14. Definition of done
+## 16. Definition of done
 
 The first portfolio-ready release is complete when:
 
--   [ ] A user can authenticate and access only permitted functionality.
--   [ ] Products, customers, and suppliers can be managed.
--   [ ] Stock can be received, adjusted, and inspected.
--   [ ] Purchase orders support partial receipts.
--   [ ] Sales orders can be confirmed and invoiced.
--   [ ] Sales and inventory updates are transactionally consistent.
--   [ ] Concurrent sales cannot oversell available stock.
--   [ ] Important actions are recorded in audit logs.
--   [ ] Reports return correct results for seeded data.
--   [ ] Critical business workflows have automated tests.
--   [ ] The application runs through documented Docker-based setup.
--   [ ] CI runs formatting, static checks, and tests.
--   [ ] The application is deployed or has a reproducible demo
-    environment.
--   [ ] README, API documentation, architecture diagram, and screenshots
-    are available.
+- A user can create or join a company and switch between authorized tenants.
+- Tenant-owned data is isolated through authorization, scoped queries, database constraints, and RLS.
+- Core product, inventory, purchasing, sales, and invoicing workflows work end-to-end.
+- Inventory remains consistent under concurrent sales and receiving.
+- Retryable writes are idempotent.
+- Background jobs are reliable and observable.
+- CI runs unit, integration, and migration checks.
+- A repeatable load test simulates 1,000 active users and reports measured results.
+- Deployment, backups, restore procedure, and operational metrics are documented.
+- A new developer can run the project using the README.
 
-------------------------------------------------------------------------
+## 17. Future improvements
 
-## 15. Future improvements
+Only consider these after the core product and its measured bottlenecks are understood:
 
-Only consider these after the MVP is stable:
+- PostgreSQL read replicas for suitable read-only workloads.
+- PgBouncer for connection management.
+- Partitioning very large append-only tables such as audit logs or inventory movements.
+- Materialized views or dedicated reporting/analytics storage.
+- Dedicated message broker if outbox polling no longer meets delivery/throughput needs.
+- Per-tenant database/schema isolation for enterprise customers with special compliance or noisy-neighbor requirements.
+- Kubernetes if deployment and operations justify its complexity.
+- Multi-region read replicas, advanced billing, subscription plans, and tenant usage metering.
+- Full accounting, e-invoicing, integrations, and AI-assisted workflows.
 
--   Multi-warehouse stock transfers.
--   Product variants and barcodes.
--   Returns and refunds.
--   Stock reservations and backorders.
--   Reorder-point suggestions.
--   Redis-backed background jobs and notifications.
--   CSV import/export.
--   Advanced reporting and scheduled report delivery.
--   Multi-tenant support for multiple businesses.
--   Observability with metrics and distributed tracing.
--   AI-assisted demand forecasting or natural-language reporting.
+Do not introduce microservices, Kafka, Kubernetes, or database-per-tenant architecture just to make the diagram look scalable. Make changes when workload measurements or product requirements justify them.
 
-AI is intentionally a later extension. The first objective is a
-dependable ERP with correct business workflows.
+## 18. CV description
 
-------------------------------------------------------------------------
+Use wording that accurately reflects what has actually been implemented and measured. Example future-facing description:
 
-## 16. CV description
+> Designed and developed NexusERP, a multi-tenant SaaS ERP platform using Go, PostgreSQL, React, and TypeScript. Implemented tenant isolation with PostgreSQL Row-Level Security and tenant-aware relational constraints, transaction-safe inventory and sales workflows, and stateless API architecture. Built automated integration and load tests to evaluate performance under a 1,000-active-user workload.
 
-Use a description like the following after the corresponding features
-are implemented:
-
-**NexusERP --- Modular Business Management Platform**
-
--   Designed and developed a modular ERP platform using Go, PostgreSQL,
-    and React to manage inventory, purchasing, sales, customers, and
-    suppliers.
--   Implemented transaction-safe inventory and sales workflows using
-    PostgreSQL transactions and row-level locking to prevent
-    overselling.
--   Built a SQL-first data-access layer using pgx and sqlc, with
-    database migrations, constraints, and integration tests.
--   Implemented authentication, role-based access control, audit
-    logging, and automated CI checks.
--   Containerized the application with Docker and documented its
-    architecture and deployment.
-
-Only include technologies and features that are genuinely implemented
-and demonstrable.
-
-------------------------------------------------------------------------
-
-## Project principle
-
-**Build fewer features, but make the important workflows correct.**
-
-A small ERP that reliably handles purchasing, inventory, and
-sales---with sound database design, concurrency control, tests, and
-clear documentation---is a stronger engineering portfolio project than a
-much larger collection of unfinished CRUD modules.
+Only claim RLS, deployment, load-test results, or 1,000-user performance after those features have been implemented and verified. Replace the final sentence with actual benchmark figures once measured.
